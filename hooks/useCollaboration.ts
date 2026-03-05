@@ -47,6 +47,19 @@ export function useCollaboration({
     return Array.from(elementsMap.values()).sort((a, b) => a.zIndex - b.zIndex);
   }, []);
 
+  // Read all collaborators from Yjs presence map
+  const syncCollaboratorsFromPresence = useCallback(() => {
+    const doc = docRef.current;
+    if (!doc) {
+      setCollaborators([]);
+      return;
+    }
+    const presenceMap = doc.getMap<Collaborator>("presence");
+    // filter out self
+    const next = Array.from(presenceMap.values()).filter(c => c.id !== userId);
+    setCollaborators(next);
+  }, []);
+
   // Connect to Yjs WebRTC provider (P2P)
   useEffect(() => {
     const doc = new Y.Doc();
@@ -74,9 +87,11 @@ export function useCollaboration({
       if (data.type === "init" && data.update) {
         Y.applyUpdate(doc, new Uint8Array(data.update));
         dispatch({ type: "SET_ELEMENTS", elements: getOrderedElements() });
+        syncCollaboratorsFromPresence();
       } else if (data.type === "yjs-update" && data.update) {
         Y.applyUpdate(doc, new Uint8Array(data.update));
         dispatch({ type: "SET_ELEMENTS", elements: getOrderedElements() });
+        syncCollaboratorsFromPresence();
       }
     };
 
@@ -97,9 +112,17 @@ export function useCollaboration({
       });
     });
 
+    // Observe presence map for collaborator changes
+    const presenceMap = doc.getMap<Collaborator>("presence");
+    const onPresenceChange = () => {
+      syncCollaboratorsFromPresence();
+    };
+    presenceMap.observe(onPresenceChange);
+
     return () => {
       eventSource.close();
       eventSourceRef.current = null;
+      presenceMap.unobserve(onPresenceChange);
       doc.destroy();
       docRef.current = null;
       elementsMapRef.current = null;
@@ -162,16 +185,62 @@ export function useCollaboration({
 
   const sendCursorMove = useCallback(
     (x: number, y: number) => {
-      // TODO: Implement server presence/cursor update if needed
+      const doc = docRef.current;
+      if (!doc) return;
+      const presenceMap = doc.getMap<Collaborator>("presence");
+      const current = presenceMap.get(userId);
+      if (!current) return;
+      presenceMap.set(userId, {
+        ...current,
+        cursor: { x, y },
+      });
+
+      // Push update to server
+      const update = Y.encodeStateAsUpdate(doc);
+      fetch(PUSH_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          userId,
+          action: {
+            type: "yjs-update",
+            update: Array.from(update),
+          },
+        }),
+      });
     },
-    []
+    [roomId, userId]
   );
 
   const sendSelectionChange = useCallback(
     (elementId: string | null) => {
-      // TODO: Implement server selection update if needed
+      const doc = docRef.current;
+      if (!doc) return;
+      const presenceMap = doc.getMap<Collaborator>("presence");
+      const current = presenceMap.get(userId);
+      if (!current) return;
+      presenceMap.set(userId, {
+        ...current,
+        selectedElementId: elementId,
+      });
+
+      // Push update to server
+      const update = Y.encodeStateAsUpdate(doc);
+      fetch(PUSH_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          userId,
+          action: {
+            type: "yjs-update",
+            update: Array.from(update),
+          },
+        }),
+      });
     },
-    []
+    [roomId, userId]
   );
 
   return {
