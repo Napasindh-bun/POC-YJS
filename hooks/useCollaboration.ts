@@ -2,11 +2,13 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import * as Y from "yjs";
+import { WebrtcProvider } from "y-webrtc";
 import type {
   CanvasAction,
   CanvasElement,
   Collaborator,
 } from "@/lib/types";
+import { COLLABORATOR_COLORS } from "@/lib/types";
 
 interface UseCollaborationOptions {
   roomId: string;
@@ -22,15 +24,33 @@ export function useCollaboration({
   dispatch,
 }: UseCollaborationOptions) {
   const LOCAL_YJS_ORIGIN = "local-yjs";
-  const REMOTE_YJS_ORIGIN = "remote-yjs";
+  const providerRef = useRef<WebrtcProvider | null>(null);
 
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
   const [isConnected, setIsConnected] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
   const cursorThrottleRef = useRef<number>(0);
   const docRef = useRef<Y.Doc | null>(null);
   const elementsMapRef = useRef<Y.Map<CanvasElement> | null>(null);
-  const presenceMapRef = useRef<Y.Map<Collaborator> | null>(null);
+
+  const getUserColor = useCallback((id: string) => {
+    const colorIndex = Array.from(id).reduce(
+      (sum, char) => sum + char.charCodeAt(0),
+      0
+    ) % COLLABORATOR_COLORS.length;
+    return COLLABORATOR_COLORS[colorIndex];
+  }, []);
+
+  const getSignalingUrls = useCallback(() => {
+    const configured = process.env.NEXT_PUBLIC_YJS_SIGNALING_URLS;
+    if (!configured) {
+      return ["wss://signaling.yjs.dev"];
+    }
+
+    return configured
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean);
+  }, []);
 
   const getOrderedElements = useCallback(() => {
     const elementsMap = elementsMapRef.current;
@@ -38,46 +58,52 @@ export function useCollaboration({
     return Array.from(elementsMap.values()).sort((a, b) => a.zIndex - b.zIndex);
   }, []);
 
-  const syncCollaboratorsFromPresence = useCallback(() => {
-    const presenceMap = presenceMapRef.current;
-    if (!presenceMap) {
+  const syncCollaboratorsFromAwareness = useCallback(() => {
+    const provider = providerRef.current;
+    if (!provider) {
       setCollaborators([]);
       return;
     }
 
-    const next = Array.from(presenceMap.values()).filter((c) => c.id !== userId);
+    const states = Array.from(provider.awareness.getStates().values()) as Array<
+      Partial<Collaborator> | undefined
+    >;
+
+    const next = states
+      .filter((state): state is Partial<Collaborator> => Boolean(state))
+      .map((state) => ({
+        id: state.id,
+        name: state.name,
+        color: state.color,
+        cursor: state.cursor ?? null,
+        selectedElementId: state.selectedElementId ?? null,
+      }))
+      .filter((state): state is Collaborator => Boolean(state.id && state.name && state.color))
+      .filter((state) => state.id !== userId);
+
     setCollaborators(next);
   }, [userId]);
 
-  const sendAction = useCallback(
-    async (action: Record<string, unknown>) => {
-      await fetch("/api/collaboration/push", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ roomId, userId, action }),
-      });
-    },
-    [roomId, userId]
-  );
-
-  // Connect to SSE realtime stream
+  // Connect to Yjs WebRTC provider (P2P)
   useEffect(() => {
     const doc = new Y.Doc();
     const elementsMap = doc.getMap<CanvasElement>("elements");
-    const presenceMap = doc.getMap<Collaborator>("presence");
     docRef.current = doc;
     elementsMapRef.current = elementsMap;
-    presenceMapRef.current = presenceMap;
 
-    const onDocUpdate = (update: Uint8Array, origin: unknown) => {
-      if (origin !== LOCAL_YJS_ORIGIN) return;
-      void sendAction({
-        type: "yjs-update",
-        update: Array.from(update),
-      });
-    };
+    const provider = new WebrtcProvider(`canvas-${roomId}`, doc, {
+      signaling: getSignalingUrls(),
+      password: process.env.NEXT_PUBLIC_YJS_ROOM_PASSWORD || undefined,
+    });
+    providerRef.current = provider;
+
+    provider.awareness.setLocalState({
+      id: userId,
+      name: userName,
+      color: getUserColor(userId),
+      cursor: null,
+      selectedElementId: null,
+    } as Collaborator);
 
     const onMapChange = (
       event: Y.YMapEvent<CanvasElement>,
@@ -103,67 +129,39 @@ export function useCollaboration({
       });
     };
 
-    const onPresenceMapChange = () => {
-      syncCollaboratorsFromPresence();
+    const onAwarenessChange = () => {
+      syncCollaboratorsFromAwareness();
     };
 
-    doc.on("update", onDocUpdate);
+    const onStatus = (event: { connected: boolean }) => {
+      setIsConnected(event.connected);
+    };
+
+    const onSynced = () => {
+      dispatch({ type: "SET_ELEMENTS", elements: getOrderedElements() });
+    };
+
     elementsMap.observe(onMapChange);
-    presenceMap.observe(onPresenceMapChange);
+    provider.awareness.on("change", onAwarenessChange);
+    provider.on("status", onStatus);
+    provider.on("synced", onSynced);
 
-    const params = new URLSearchParams({ roomId, userId, userName });
-    const eventSource = new EventSource(`/api/collaboration/stream?${params.toString()}`);
-    eventSourceRef.current = eventSource;
-
-    eventSource.onopen = () => {
-      setIsConnected(true);
-    };
-
-    eventSource.onerror = () => {
-      setIsConnected(false);
-    };
-
-    eventSource.onmessage = (message) => {
-      try {
-        const event = JSON.parse(message.data) as
-          | { type: "init"; update: number[] }
-          | { type: "yjs-update"; update: number[]; senderId: string };
-
-        if (event.type === "init") {
-          const update = new Uint8Array(event.update || []);
-          if (update.length > 0) {
-            Y.applyUpdate(doc, update, REMOTE_YJS_ORIGIN);
-            dispatch({ type: "SET_ELEMENTS", elements: getOrderedElements() });
-          }
-          syncCollaboratorsFromPresence();
-          return;
-        }
-
-        if (event.type === "yjs-update") {
-          if (event.senderId === userId) return;
-          const update = new Uint8Array(event.update || []);
-          if (update.length === 0) return;
-          Y.applyUpdate(doc, update, REMOTE_YJS_ORIGIN);
-          return;
-        }
-      } catch {
-        // ignore malformed events
-      }
-    };
+    syncCollaboratorsFromAwareness();
 
     return () => {
       elementsMap.unobserve(onMapChange);
-      presenceMap.unobserve(onPresenceMapChange);
-      doc.off("update", onDocUpdate);
+      provider.off("synced", onSynced);
+      provider.off("status", onStatus);
+      provider.awareness.off("change", onAwarenessChange);
+      provider.awareness.setLocalState(null);
+      provider.destroy();
+      providerRef.current = null;
+
       doc.destroy();
       docRef.current = null;
       elementsMapRef.current = null;
-      presenceMapRef.current = null;
 
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
+      setCollaborators([]);
       setIsConnected(false);
     };
   }, [
@@ -171,9 +169,10 @@ export function useCollaboration({
     userId,
     userName,
     dispatch,
+    getSignalingUrls,
+    getUserColor,
     getOrderedElements,
-    sendAction,
-    syncCollaboratorsFromPresence,
+    syncCollaboratorsFromAwareness,
   ]);
 
   const sendMutation = useCallback(
@@ -227,40 +226,34 @@ export function useCollaboration({
       if (now - cursorThrottleRef.current < 50) return;
       cursorThrottleRef.current = now;
 
-      const doc = docRef.current;
-      const presenceMap = presenceMapRef.current;
-      if (!doc || !presenceMap) return;
+      const provider = providerRef.current;
+      if (!provider) return;
 
-      const current = presenceMap.get(userId);
+      const current = provider.awareness.getLocalState() as Collaborator | null;
       if (!current) return;
 
-      doc.transact(() => {
-        presenceMap.set(userId, {
-          ...current,
-          cursor: { x, y },
-        });
-      }, LOCAL_YJS_ORIGIN);
+      provider.awareness.setLocalState({
+        ...current,
+        cursor: { x, y },
+      });
     },
-    [userId]
+    []
   );
 
   const sendSelectionChange = useCallback(
     (elementId: string | null) => {
-      const doc = docRef.current;
-      const presenceMap = presenceMapRef.current;
-      if (!doc || !presenceMap) return;
+      const provider = providerRef.current;
+      if (!provider) return;
 
-      const current = presenceMap.get(userId);
+      const current = provider.awareness.getLocalState() as Collaborator | null;
       if (!current) return;
 
-      doc.transact(() => {
-        presenceMap.set(userId, {
-          ...current,
-          selectedElementId: elementId,
-        });
-      }, LOCAL_YJS_ORIGIN);
+      provider.awareness.setLocalState({
+        ...current,
+        selectedElementId: elementId,
+      });
     },
-    [userId]
+    []
   );
 
   return {
