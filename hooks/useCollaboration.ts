@@ -32,6 +32,13 @@ export function useCollaboration({
   const docRef = useRef<Y.Doc | null>(null);
   const elementsMapRef = useRef<Y.Map<CanvasElement> | null>(null);
 
+  // DEBUG LOG: Initial config
+  useEffect(() => {
+    console.log('[YJS-P2P] roomId:', roomId, 'userId:', userId, 'userName:', userName);
+    console.log('[YJS-P2P] signaling URLs:', process.env.NEXT_PUBLIC_YJS_SIGNALING_URLS);
+    console.log('[YJS-P2P] room password:', process.env.NEXT_PUBLIC_YJS_ROOM_PASSWORD);
+  }, [roomId, userId, userName]);
+
   const getUserColor = useCallback((id: string) => {
     const colorIndex = Array.from(id).reduce(
       (sum, char) => sum + char.charCodeAt(0),
@@ -81,6 +88,8 @@ export function useCollaboration({
       .filter((state): state is Collaborator => Boolean(state.id && state.name && state.color))
       .filter((state) => state.id !== userId);
 
+    // DEBUG LOG: Awareness states
+    console.log('[YJS-P2P] awareness states:', next);
     setCollaborators(next);
   }, [userId]);
 
@@ -105,6 +114,9 @@ export function useCollaboration({
       selectedElementId: null,
     } as Collaborator);
 
+    // DEBUG LOG: Provider created
+    console.log('[YJS-P2P] WebrtcProvider created:', provider);
+
     const onMapChange = (
       event: Y.YMapEvent<CanvasElement>,
       transaction: Y.Transaction
@@ -112,6 +124,8 @@ export function useCollaboration({
       if (transaction.origin === LOCAL_YJS_ORIGIN) return;
 
       event.changes.keys.forEach((change, key) => {
+        // DEBUG LOG: Element change
+        console.log('[YJS-P2P] element change:', change.action, key);
         if (change.action === "delete") {
           dispatch({ type: "DELETE_ELEMENTS", ids: [key] });
           return;
@@ -130,14 +144,20 @@ export function useCollaboration({
     };
 
     const onAwarenessChange = () => {
+      // DEBUG LOG: Awareness change event
+      console.log('[YJS-P2P] awareness change event');
       syncCollaboratorsFromAwareness();
     };
 
     const onStatus = (event: { connected: boolean }) => {
+      // DEBUG LOG: Provider status
+      console.log('[YJS-P2P] provider status:', event.connected);
       setIsConnected(event.connected);
     };
 
     const onSynced = () => {
+      // DEBUG LOG: Provider synced
+      console.log('[YJS-P2P] provider synced');
       dispatch({ type: "SET_ELEMENTS", elements: getOrderedElements() });
     };
 
