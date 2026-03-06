@@ -148,6 +148,7 @@ export function useCollaboration({
           if (!patch) return;
           const existing = elementsMap.get(patch.id);
           if (!existing) return;
+          // รองรับ lockedBy property
           elementsMap.set(patch.id, { ...existing, ...patch });
         }
         if (type === "element-delete") {

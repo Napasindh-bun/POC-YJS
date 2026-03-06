@@ -263,6 +263,7 @@ export default function CanvasEditor({
     if (!Konva) return null;
     const KonvaLib = Konva;
 
+    const userId = collaborators.find(c => c.id)?.id || "";
     const common: any = {
       id: el.id,
       name: el.id,
@@ -272,7 +273,7 @@ export default function CanvasEditor({
       scaleX: el.scaleX || 1,
       scaleY: el.scaleY || 1,
       opacity: el.opacity ?? 1,
-      draggable: el.draggable && !el.locked,
+      draggable: el.draggable && (!el.lockedBy || el.lockedBy === userId),
       strokeScaleEnabled: false,
     };
 
@@ -439,6 +440,14 @@ export default function CanvasEditor({
       });
 
       shape.on("dragstart", () => {
+        const userId = collaborators.find(c => c.id)?.id || "";
+        const el = stateRef.current.elements.find((e: CanvasElement) => e.id === elId);
+        if (el && el.lockedBy && el.lockedBy !== userId) {
+          // Node ถูก lock โดยคนอื่น
+          return;
+        }
+        // Lock node
+        sendMutation("element-update", { element: { id: elId, lockedBy: userId } });
         pushHistory(stateRef.current.elements);
 
         const selectedIds = stateRef.current.selectedIds;
@@ -493,6 +502,9 @@ export default function CanvasEditor({
       });
 
       shape.on("dragend", (e: any) => {
+        const userId = collaborators.find(c => c.id)?.id || "";
+        // Unlock node
+        sendMutation("element-update", { element: { id: elId, lockedBy: null } });
         if (dragSyncRef.current.timer) {
           clearTimeout(dragSyncRef.current.timer);
           dragSyncRef.current.timer = null;
@@ -647,7 +659,7 @@ export default function CanvasEditor({
 
     sorted.forEach((el, i) => {
       let shape = shapeMapRef.current.get(el.id);
-
+      const userId = collaborators.find(c => c.id)?.id || "";
       if (!shape) {
         // Create new shape
         shape = createShape(el);
@@ -666,7 +678,7 @@ export default function CanvasEditor({
           scaleX: el.scaleX || 1,
           scaleY: el.scaleY || 1,
           opacity: el.opacity ?? 1,
-          draggable: el.draggable && !el.locked,
+          draggable: el.draggable && (!el.lockedBy || el.lockedBy === userId),
           visible: el.visible,
         });
 
