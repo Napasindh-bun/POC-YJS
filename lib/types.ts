@@ -50,7 +50,6 @@ export interface CanvasElement {
   visible: boolean;
   name: string;
   zIndex: number;
-    lockedBy?: string | null;
 }
 
 export interface Collaborator {
