@@ -190,6 +190,7 @@ export default function CanvasEditor({
         rotateAnchorOffset: 20,
         keepRatio: false,
         rotateEnabled: true,
+        flipEnabled: false,
         enabledAnchors: [
           "top-left",
           "top-right",
@@ -200,6 +201,7 @@ export default function CanvasEditor({
           "top-center",
           "bottom-center",
         ],
+        shouldOverdrawWholeArea: true,
         boundBoxFunc: (oldBox: any, newBox: any) => {
           if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) {
             return oldBox;
@@ -298,6 +300,25 @@ export default function CanvasEditor({
           stroke: el.stroke,
           strokeWidth: el.strokeWidth,
         });
+        
+        // Add width/height methods for Transformer compatibility
+        if (shape) {
+          const originalRadius = shape.radius.bind(shape);
+          shape.width = function(val?: number) {
+            if (val !== undefined) {
+              this.radius(val / 2);
+              return this;
+            }
+            return this.radius() * 2;
+          };
+          shape.height = function(val?: number) {
+            if (val !== undefined) {
+              this.radius(val / 2);
+              return this;
+            }
+            return this.radius() * 2;
+          };
+        }
         break;
       case "ellipse":
         shape = new KonvaLib.Ellipse({
@@ -535,21 +556,92 @@ export default function CanvasEditor({
           x: node.x(),
           y: node.y(),
           rotation: node.rotation(),
-          scaleX: node.scaleX(),
-          scaleY: node.scaleY(),
         };
-        // For resizable shapes, compute new width/height
-        if (node.width && node.height) {
-          updates.width = node.width() * node.scaleX();
-          updates.height = node.height() * node.scaleY();
+        
+        // Bake scale into dimensions and reset scale to 1
+        const scaleX = node.scaleX();
+        const scaleY = node.scaleY();
+        const nodeClass = node.getClassName();
+        
+        if (nodeClass === "Circle") {
+          // For circle - convert to ellipse if scaled unevenly
+          const threshold = 0.01;
+          if (Math.abs(scaleX - scaleY) < threshold) {
+            // Uniform scale - keep as circle and update radius immediately
+            const newRadius = node.radius() * ((scaleX + scaleY) / 2);
+            updates.radius = newRadius;
+            updates.scaleX = 1;
+            updates.scaleY = 1;
+            node.radius(newRadius);
+            node.scaleX(1);
+            node.scaleY(1);
+          } else {
+            // Non-uniform scale - convert to ellipse
+            const currentElement = stateRef.current.elements.find((e) => e.id === elId);
+            if (currentElement && Konva) {
+              updates.type = "ellipse";
+              updates.radiusX = node.radius() * scaleX;
+              updates.radiusY = node.radius() * scaleY;
+              updates.scaleX = 1;
+              updates.scaleY = 1;
+              
+              // Destroy old circle and create new ellipse immediately
+              const oldZIndex = node.getZIndex();
+              node.destroy();
+              shapeMapRef.current.delete(elId);
+              
+              // Create new ellipse with updated properties
+              const newElement = { ...currentElement, ...updates };
+              const newShape = createShape(newElement);
+              
+              if (newShape && mainLayerRef.current) {
+                mainLayerRef.current.add(newShape);
+                newShape.setZIndex(oldZIndex);
+                shapeMapRef.current.set(elId, newShape);
+                attachShapeEvents(newShape, elId);
+                
+                // Reattach transformer to new shape
+                if (transformerRef.current && stateRef.current.selectedIds.includes(elId)) {
+                  const selectedNodes = stateRef.current.selectedIds
+                    .map((id) => shapeMapRef.current.get(id))
+                    .filter(Boolean);
+                  transformerRef.current.nodes(selectedNodes);
+                }
+                
+                mainLayerRef.current.batchDraw();
+              }
+            }
+          }
+        } else if (nodeClass === "Ellipse") {
+          // For ellipse - bake scale into radiusX/radiusY
+          const newRadiusX = node.radiusX() * scaleX;
+          const newRadiusY = node.radiusY() * scaleY;
+          updates.radiusX = newRadiusX;
+          updates.radiusY = newRadiusY;
+          updates.scaleX = 1;
+          updates.scaleY = 1;
+          node.radiusX(newRadiusX);
+          node.radiusY(newRadiusY);
           node.scaleX(1);
           node.scaleY(1);
-        }
-        if (node.radius) {
-          updates.radius = node.radius() * Math.max(node.scaleX(), node.scaleY());
+        } else if (node.width && node.height) {
+          // For rect, text, image - bake scale into width/height
+          const newWidth = node.width() * scaleX;
+          const newHeight = node.height() * scaleY;
+          updates.width = newWidth;
+          updates.height = newHeight;
+          updates.scaleX = 1;
+          updates.scaleY = 1;
+          node.width(newWidth);
+          node.height(newHeight);
           node.scaleX(1);
           node.scaleY(1);
+        } else {
+          // For shapes without dimensions (line, arrow, freedraw), keep scale
+          updates.scaleX = scaleX;
+          updates.scaleY = scaleY;
         }
+        
         dispatch({ type: "UPDATE_ELEMENT", id: elId, updates });
         sendMutation("element-update", { element: { id: elId, ...updates } });
       });
@@ -647,6 +739,25 @@ export default function CanvasEditor({
 
     sorted.forEach((el, i) => {
       let shape = shapeMapRef.current.get(el.id);
+
+      // Check if shape type matches element type
+      const needsRecreate = shape && (
+        (el.type === "circle" && shape.getClassName() !== "Circle") ||
+        (el.type === "ellipse" && shape.getClassName() !== "Ellipse") ||
+        (el.type === "rect" && shape.getClassName() !== "Rect") ||
+        (el.type === "line" && shape.getClassName() !== "Line") ||
+        (el.type === "arrow" && shape.getClassName() !== "Arrow") ||
+        (el.type === "text" && shape.getClassName() !== "Text") ||
+        (el.type === "freedraw" && shape.getClassName() !== "Line") ||
+        (el.type === "image" && (shape.getClassName() !== "Image" && shape.getClassName() !== "Rect"))
+      );
+
+      if (needsRecreate) {
+        // Type changed - destroy old shape and create new one
+        shape.destroy();
+        shapeMapRef.current.delete(el.id);
+        shape = null;
+      }
 
       if (!shape) {
         // Create new shape

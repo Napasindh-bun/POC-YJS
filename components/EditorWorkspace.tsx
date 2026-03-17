@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useCallback, useMemo } from "react";
+import { useRef, useCallback, useMemo, useEffect } from "react";
 import { CanvasContext, useCanvasReducer } from "@/hooks/useCanvasStore";
 import { useCollaboration } from "@/hooks/useCollaboration";
+import { useLocalPersistence } from "@/hooks/useLocalPersistence";
 import { useHistory } from "@/hooks/useHistory";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import TopToolbar from "@/components/toolbar/TopToolbar";
@@ -10,7 +11,7 @@ import ToolSidebar from "@/components/toolbar/ToolSidebar";
 import PropertiesPanel from "@/components/toolbar/PropertiesPanel";
 import ZoomControls from "@/components/toolbar/ZoomControls";
 import CanvasEditor from "@/components/canvas/CanvasEditor";
-import { createDefaultElement } from "@/lib/types";
+import { CanvasElement, createDefaultElement } from "@/lib/types";
 import { getRandomName } from "@/lib/colors";
 
 interface EditorWorkspaceProps {
@@ -37,12 +38,56 @@ export default function EditorWorkspace({ roomId }: EditorWorkspaceProps) {
     sendMutation,
     sendCursorMove,
     sendSelectionChange,
+    getDoc,
   } = useCollaboration({
     roomId,
     userId: userRef.current.id,
     userName: userRef.current.name,
     dispatch,
   });
+
+  // Local Storage Persistence
+  const {
+    loadFromLocal,
+    saveToLocal,
+    hasDraft,
+    getDraftInfo,
+    lastSaved,
+  } = useLocalPersistence({
+    roomId,
+    ydoc: getDoc(),
+    enabled: true,
+    autoSaveInterval: 10000, // Auto-save ทุก 10 วินาที
+  });
+
+  // โหลด draft จาก localStorage เมื่อเริ่มต้น (ก่อน sync กับ server)
+  useEffect(() => {
+    const doc = getDoc();
+    if (!doc) return;
+
+    // รอให้ Yjs document พร้อม
+    const timer = setTimeout(() => {
+      if (hasDraft()) {
+        const info = getDraftInfo();
+        const ageMinutes = info ? Math.floor(info.age / 60000) : 0;
+        console.log(`📦 Found localStorage draft (${ageMinutes} minutes old)`);
+        
+        // โหลด draft และอัพเดท UI
+        const loaded = loadFromLocal();
+        if (loaded) {
+          // Force refresh elements from Yjs
+          const elementsMap = doc.getMap<CanvasElement>("elements");
+          const elements = Array.from(elementsMap.values()).sort(
+            (a, b) => a.zIndex - b.zIndex
+          );
+          dispatch({ type: "SET_ELEMENTS", elements });
+          console.log(`✅ Loaded ${elements.length} elements from localStorage`);
+        }
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [getDoc, hasDraft, loadFromLocal, getDraftInfo, dispatch]);
 
   // Undo/Redo handlers
   const handleUndo = useCallback(() => {

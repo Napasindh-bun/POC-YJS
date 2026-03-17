@@ -243,11 +243,17 @@ export function useCollaboration({
     [roomId, userId]
   );
 
+  // ฟังก์ชันสำหรับ access Yjs document (ใช้สำหรับ localStorage persistence)
+  const getDoc = useCallback(() => {
+    return docRef.current;
+  }, []);
+
   return {
     collaborators,
     isConnected,
     sendMutation,
     sendCursorMove,
     sendSelectionChange,
+    getDoc,
   };
 }
